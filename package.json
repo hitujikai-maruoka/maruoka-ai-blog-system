@@ -1,0 +1,30 @@
+{
+  "name": "maruoka-ai-blog-system",
+  "version": "4.0.0",
+  "description": "羊飼いまるおか AI自動ブログ生成システム Phase 3+4完全版",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node src/index.js --test",
+    "test:notion": "node tests/test-notion-connection.js",
+    "test:phase4": "node tests/test-phase4.js",
+    "test:integration": "node tests/test-integration.js",
+    "test:all": "npm run test:notion && npm run test:integration",
+    "article:generate": "node src/article-generator.js"
+  },
+  "dependencies": {
+    "@notionhq/client": "^2.2.15",
+    "axios": "^1.6.0",
+    "xml2js": "^0.6.2",
+    "dotenv": "^16.3.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "羊飼いまるおか",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/羊貝丸岡/maruoka-ai-blog-system"
+  }
+}

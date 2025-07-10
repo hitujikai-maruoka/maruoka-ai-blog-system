@@ -1,0 +1,114 @@
+name: 羊飼いまるおか自動ブログ生成
+
+on:
+  # 定期実行（毎日21時 JST = 12時 UTC）
+  schedule:
+    - cron: '0 12 * * *'
+  
+  # 手動実行
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: 'テストモードで実行'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+        - 'true'
+        - 'false'
+
+jobs:
+  process-episodes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    
+    steps:
+      - name: 🐑 チェックアウト
+        uses: actions/checkout@v4
+        
+      - name: 📦 Node.js セットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          
+      - name: 🔧 依存関係インストール
+        run: npm install
+        
+      - name: 📁 ディレクトリ準備
+        run: mkdir -p data
+          
+      - name: 🚀 エピソード処理実行
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          STANDFM_RSS_URL: ${{ secrets.STANDFM_RSS_URL }}
+          STANDFM_CHANNEL_ID: ${{ secrets.STANDFM_CHANNEL_ID }}
+          TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
+        run: |
+          echo "🚀 羊飼いまるおか自動ブログ生成開始"
+          echo "実行モード: $TEST_MODE"
+          echo "実行時刻（JST）: $(TZ=Asia/Tokyo date)"
+          
+          if [ "$TEST_MODE" = "true" ]; then
+            echo "🧪 テストモードで実行"
+            node src/index.js --test
+          else
+            echo "🎯 本格モードで実行"
+            node src/index.js
+          fi
+          
+      - name: 📊 処理結果サマリー
+        if: always()
+        run: |
+          echo "## 🐑 羊飼いまるおか 処理結果" >> $GITHUB_STEP_SUMMARY
+          echo "**実行時刻（JST）:** $(TZ=Asia/Tokyo date)" >> $GITHUB_STEP_SUMMARY
+          echo "**実行トリガー:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**テストモード:** ${{ github.event.inputs.test_mode || 'false' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f "data/processing_summary.json" ]; then
+            echo "### 📋 処理結果" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat data/processing_summary.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+          
+      - name: 💾 結果保存
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: daily-results-${{ github.run_number }}
+          path: data/
+          retention-days: 30
+          
+      - name: 📧 エラー通知（本格モードのみ）
+        if: failure() && (github.event.inputs.test_mode != 'true')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `❌ 羊飼いまるおか 毎日処理エラー (${new Date().toLocaleDateString('ja-JP')})`;
+            const body = `
+            ## 🐑 羊飼いまるおか 毎日処理エラー報告
+            
+            **エラー発生時刻（JST）:** ${new Date().toLocaleString('ja-JP', {timeZone: 'Asia/Tokyo'})}
+            **ワークフロー実行ID:** ${{ github.run_id }}
+            
+            ### 🔗 関連リンク
+            - [実行ログ](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            
+            ### 🔧 対処が必要です
+            1. 実行ログを確認してエラー原因を特定
+            2. RSS URL やNotion API接続を確認
+            3. 修正後、手動でワークフローを再実行
+            
+            ### 📅 次回の自動実行
+            明日の21時に自動実行されます
+            `;
+            
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['bug', 'automation', 'daily-processing']
+            });

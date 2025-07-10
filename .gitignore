@@ -1,0 +1,8 @@
+.env 
+.env.backup 
+node_modules/ 
+*.backup 
+*.bak 
+*.old 
+data/ 
+logs/ 
