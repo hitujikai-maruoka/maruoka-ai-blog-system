@@ -1,0 +1,597 @@
+name: 📧 データリセット&全件再処理システム
+
+on:
+  workflow_dispatch:
+    inputs:
+      reset_mode:
+        description: '🔄 実行モード'
+        required: true
+        default: 'preview_only'
+        type: choice
+        options:
+          - preview_only
+          - test_reset_5
+          - full_reset_10
+          - full_reset_20
+          - gmail_test_only
+      confirm_reset:
+        description: '⚠️ データ削除の確認（YES で実行）'
+        required: true
+        default: 'NO'
+        type: string
+
+jobs:
+  reset-and-reprocess:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    steps:
+      - name: 🚀 リポジトリをチェックアウト
+        uses: actions/checkout@v4
+        
+      - name: 📦 Node.js環境をセットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          
+      - name: 🔧 依存関係をインストール
+        run: |
+          echo "📦 依存関係インストール開始..."
+          npm install
+          npm install googleapis google-auth-library @notionhq/client axios xml2js
+          echo "✅ 依存関係インストール完了"
+          
+      - name: ⚠️ 実行前確認
+        run: |
+          echo "⚠️ データリセット&全件再処理システム"
+          echo "実行モード: ${{ github.event.inputs.reset_mode }}"
+          echo "確認フラグ: ${{ github.event.inputs.confirm_reset }}"
+          
+          if [ "${{ github.event.inputs.confirm_reset }}" != "YES" ] && [ "${{ github.event.inputs.reset_mode }}" != "preview_only" ] && [ "${{ github.event.inputs.reset_mode }}" != "gmail_test_only" ]; then
+            echo "❌ データ削除を伴う処理には確認が必要です"
+            echo "confirm_reset に 'YES' を入力してください"
+            exit 1
+          fi
+          
+          echo "✅ 実行確認完了"
+          
+      - name: 🔍 環境変数確認
+        run: |
+          echo "🔍 システム環境確認中..."
+          echo "Notion API Key: ${{ secrets.NOTION_API_KEY != '' && '✅ 設定済み' || '❌ 未設定' }}"
+          echo "Notion Database ID: ${{ secrets.NOTION_DATABASE_ID != '' && '✅ 設定済み' || '❌ 未設定' }}"
+          echo "Gmail Credentials: ${{ secrets.GMAIL_CREDENTIALS_JSON != '' && '✅ 設定済み' || '❌ 未設定' }}"
+          echo "Gmail Token: ${{ secrets.GMAIL_TOKEN_JSON != '' && '✅ 設定済み' || '❌ 未設定' }}"
+          echo "Stand.FM RSS: ${{ secrets.STANDFM_RSS_URL != '' && '✅ 設定済み' || '❌ 未設定' }}"
+          echo "Stand.FM Channel: ${{ secrets.STANDFM_CHANNEL_ID != '' && '✅ 設定済み' || '❌ 未設定' }}"
+          
+      - name: 🔄 データリセット&全件再処理実行
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          GMAIL_CREDENTIALS_JSON: ${{ secrets.GMAIL_CREDENTIALS_JSON }}
+          GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
+          STANDFM_RSS_URL: ${{ secrets.STANDFM_RSS_URL }}
+          STANDFM_CHANNEL_ID: ${{ secrets.STANDFM_CHANNEL_ID }}
+          RESET_MODE: ${{ github.event.inputs.reset_mode }}
+          CONFIRM_RESET: ${{ github.event.inputs.confirm_reset }}
+        run: |
+          echo "🔄 データリセット&全件再処理システム開始"
+          echo "実行モード: $RESET_MODE"
+          echo "実行時刻: $(date '+%Y-%m-%d %H:%M:%S JST')"
+          
+          cat > complete-reset-system.js << 'EOF'
+          const { Client } = require('@notionhq/client');
+          const { google } = require('googleapis');
+          const axios = require('axios');
+          const xml2js = require('xml2js');
+          
+          class CompleteResetSystem {
+              constructor() {
+                  this.notion = new Client({ auth: process.env.NOTION_API_KEY });
+                  this.databaseId = process.env.NOTION_DATABASE_ID;
+                  this.rssUrl = process.env.STANDFM_RSS_URL;
+                  this.resetMode = process.env.RESET_MODE;
+                  this.confirmReset = process.env.CONFIRM_RESET;
+                  
+                  // モード別設定
+                  this.config = this.getConfig();
+                  
+                  // Gmail設定
+                  this.gmailCredentials = JSON.parse(process.env.GMAIL_CREDENTIALS_JSON || '{}');
+                  this.gmailToken = JSON.parse(process.env.GMAIL_TOKEN_JSON || '{}');
+                  this.gmail = null;
+                  
+                  console.log(`🎯 実行モード: ${this.resetMode}`);
+                  console.log(`📊 処理予定: ${this.config.maxEpisodes} エピソード`);
+                  console.log(`📧 Gmail送信: ${this.config.enableGmail ? '有効' : '無効'}`);
+                  console.log(`🗑️ データ削除: ${this.config.deleteData ? '有効' : '無効'}`);
+              }
+              
+              getConfig() {
+                  const configs = {
+                      'preview_only': {
+                          deleteData: false,
+                          maxEpisodes: 5,
+                          enableGmail: false,
+                          description: 'プレビューのみ（データ変更なし）'
+                      },
+                      'test_reset_5': {
+                          deleteData: true,
+                          maxEpisodes: 5,
+                          enableGmail: true,
+                          description: 'テスト用リセット（5件処理）'
+                      },
+                      'full_reset_10': {
+                          deleteData: true,
+                          maxEpisodes: 10,
+                          enableGmail: true,
+                          description: '標準リセット（10件処理）'
+                      },
+                      'full_reset_20': {
+                          deleteData: true,
+                          maxEpisodes: 20,
+                          enableGmail: true,
+                          description: '大量リセット（20件処理）'
+                      },
+                      'gmail_test_only': {
+                          deleteData: false,
+                          maxEpisodes: 3,
+                          enableGmail: true,
+                          description: 'Gmail送信テストのみ'
+                      }
+                  };
+                  
+                  return configs[this.resetMode] || configs['preview_only'];
+              }
+              
+              async initializeGmail() {
+                  if (!this.config.enableGmail) {
+                      console.log('📧 Gmail機能は無効です');
+                      return false;
+                  }
+                  
+                  try {
+                      console.log('\n📧 Gmail初期化中...');
+                      const auth = new google.auth.OAuth2(
+                          this.gmailCredentials.client_id,
+                          this.gmailCredentials.client_secret,
+                          this.gmailCredentials.redirect_uris[0]
+                      );
+                      auth.setCredentials(this.gmailToken);
+                      this.gmail = google.gmail({ version: 'v1', auth: auth });
+                      
+                      const profile = await this.gmail.users.getProfile({ userId: 'me' });
+                      console.log(`✅ Gmail初期化成功: ${profile.data.emailAddress}`);
+                      return true;
+                      
+                  } catch (error) {
+                      console.log(`⚠️ Gmail初期化失敗: ${error.message}`);
+                      return false;
+                  }
+              }
+              
+              async resetNotionDatabase() {
+                  if (!this.config.deleteData) {
+                      console.log('\n📋 データ削除はスキップされます（プレビューモード）');
+                      return 0;
+                  }
+                  
+                  try {
+                      console.log('\n🗑️ Notionデータベースリセット開始');
+                      
+                      // 既存データ取得
+                      let hasMore = true;
+                      let nextCursor = undefined;
+                      let deletedCount = 0;
+                      let totalCount = 0;
+                      
+                      // まず総数をカウント
+                      console.log('📊 既存データ数確認中...');
+                      const countResponse = await this.notion.databases.query({
+                          database_id: this.databaseId,
+                          page_size: 1
+                      });
+                      
+                      if (countResponse.results.length === 0) {
+                          console.log('📝 削除対象のデータはありません');
+                          return 0;
+                      }
+                      
+                      console.log('🗑️ データ削除開始...');
+                      
+                      hasMore = true;
+                      nextCursor = undefined;
+                      
+                      while (hasMore && deletedCount < 100) { // 安全のため上限設定
+                          const response = await this.notion.databases.query({
+                              database_id: this.databaseId,
+                              start_cursor: nextCursor,
+                              page_size: 20
+                          });
+                          
+                          // ページを削除
+                          for (const page of response.results) {
+                              try {
+                                  const title = page.properties.Title?.title?.[0]?.text?.content || '無題';
+                                  
+                                  await this.notion.pages.update({
+                                      page_id: page.id,
+                                      archived: true
+                                  });
+                                  deletedCount++;
+                                  
+                                  if (deletedCount % 5 === 0) {
+                                      console.log(`🗑️ 削除中... ${deletedCount} 件完了`);
+                                  }
+                                  
+                                  // API制限対策
+                                  await new Promise(resolve => setTimeout(resolve, 100));
+                                  
+                              } catch (error) {
+                                  console.log(`⚠️ ページ削除エラー: ${error.message}`);
+                              }
+                          }
+                          
+                          hasMore = response.has_more;
+                          nextCursor = response.next_cursor;
+                      }
+                      
+                      console.log(`✅ Notionデータベースリセット完了: ${deletedCount} 件削除`);
+                      return deletedCount;
+                      
+                  } catch (error) {
+                      console.error(`❌ Notionリセットエラー: ${error.message}`);
+                      throw error;
+                  }
+              }
+              
+              async fetchAllEpisodes() {
+                  try {
+                      console.log('\n📡 Stand.FM RSS取得開始');
+                      
+                      const response = await axios.get(this.rssUrl, {
+                          timeout: 30000,
+                          headers: {
+                              'User-Agent': 'Mozilla/5.0 (compatible; Maruoka RSS Reader)'
+                          }
+                      });
+                      
+                      console.log(`📦 RSS取得成功: ${response.data.length.toLocaleString()} 文字`);
+                      
+                      const parser = new xml2js.Parser();
+                      const result = await parser.parseStringPromise(response.data);
+                      
+                      const items = result.rss.channel[0].item || [];
+                      console.log(`📋 総エピソード数: ${items.length} 件`);
+                      
+                      // 最新からmaxEpisodes件を処理
+                      const episodesToProcess = items.slice(0, this.config.maxEpisodes);
+                      console.log(`🎯 処理対象: ${episodesToProcess.length} 件`);
+                      
+                      return episodesToProcess;
+                      
+                  } catch (error) {
+                      console.error(`❌ RSS取得エラー: ${error.message}`);
+                      throw error;
+                  }
+              }
+              
+              async processEpisode(item, index) {
+                  try {
+                      const title = item.title[0];
+                      const pubDate = new Date(item.pubDate[0]);
+                      const description = item.description[0];
+                      const link = item.link[0];
+                      const guid = item.guid[0]._ || item.guid[0];
+                      
+                      console.log(`\n📝 [${index + 1}/${this.config.maxEpisodes}] 処理中: ${title}`);
+                      
+                      if (!this.config.deleteData && this.resetMode !== 'gmail_test_only') {
+                          console.log(`📋 プレビューモード: ${title} (実際の処理はスキップ)`);
+                          return { success: true, preview: true };
+                      }
+                      
+                      // ブログ記事生成
+                      const blogContent = this.generateBlogContent(title, description, pubDate);
+                      
+                      let notionPage = null;
+                      
+                      // Notion保存（gmail_test_onlyの場合は既存データを使用）
+                      if (this.resetMode === 'gmail_test_only') {
+                          // 既存データを取得
+                          const existingData = await this.notion.databases.query({
+                              database_id: this.databaseId,
+                              page_size: 1,
+                              sorts: [{ property: 'Created', direction: 'descending' }]
+                          });
+                          
+                          if (existingData.results.length > 0) {
+                              notionPage = existingData.results[0];
+                              console.log(`📖 既存データ使用: ${notionPage.id}`);
+                          } else {
+                              console.log('⚠️ 既存データなし、新規作成します');
+                              notionPage = await this.saveToNotion({
+                                  title: title,
+                                  content: blogContent,
+                                  episodeId: guid,
+                                  pubDate: pubDate,
+                                  link: link,
+                                  description: description
+                              });
+                          }
+                      } else {
+                          notionPage = await this.saveToNotion({
+                              title: title,
+                              content: blogContent,
+                              episodeId: guid,
+                              pubDate: pubDate,
+                              link: link,
+                              description: description
+                          });
+                      }
+                      
+                      console.log(`✅ [${index + 1}] Notion処理完了: ${notionPage.id}`);
+                      
+                      // Gmail送信（最初の3件まで）
+                      if (this.gmail && index < 3) {
+                          await this.sendGmailNotification({
+                              title: title,
+                              content: blogContent,
+                              notionUrl: notionPage.url,
+                              episodeIndex: index + 1,
+                              totalEpisodes: this.config.maxEpisodes
+                          });
+                      }
+                      
+                      return { success: true, notionId: notionPage.id };
+                      
+                  } catch (error) {
+                      console.error(`❌ エピソード処理エラー: ${error.message}`);
+                      return { success: false, error: error.message };
+                  }
+              }
+              
+              generateBlogContent(title, description, pubDate) {
+                  const jstDate = pubDate.toLocaleString('ja-JP', { 
+                      timeZone: 'Asia/Tokyo',
+                      year: 'numeric',
+                      month: 'long',
+                      day: 'numeric'
+                  });
+                  
+                  return `# ${title}
+          
+          ## 📅 配信日
+          ${jstDate}
+          
+          ## 📄 エピソード概要
+          ${description}
+          
+          ## 🎙️ 今回のハイライト
+          このエピソードでは、羊飼いまるおかの日常や羊たちとの生活について詳しくお話しています。季節の変化とともに変わる羊の様子や、牧場での出来事など、リスナーの皆さんに暖かなひとときをお届けします。
+          
+          ## 🐑 羊たちの近況
+          - 健康状態の観察とケア
+          - 季節に応じた放牧管理
+          - 羊同士の関係性の変化
+          - 新しい発見や気づき
+          
+          ## 🌟 羊飼いからのメッセージ
+          毎日の羊の世話を通して感じることや学んだことを、リスナーの皆さんと共有しています。小さな発見から大きな気づきまで、羊飼い生活の豊かさをお伝えできれば嬉しいです。
+          
+          ## 💭 今回のまとめ
+          羊たちとの日々は毎日が新しい発見の連続です。今回のエピソードでも、羊飼いとしての経験や学び、そして羊たちとの暖かな交流をお届けできました。
+          
+          ---
+          
+          🤖 **この記事は音声配信から自動生成されました**
+          📅 生成日時: ${new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}
+          🔧 システム: 羊飼いまるおか AI自動ブログ生成システム`;
+              }
+              
+              async saveToNotion(data) {
+                  try {
+                      const page = await this.notion.pages.create({
+                          parent: { database_id: this.databaseId },
+                          properties: {
+                              'Title': {
+                                  title: [{ text: { content: data.title } }]
+                              },
+                              'Status': {
+                                  select: { name: '✅ 完了' }
+                              },
+                              'Created': {
+                                  date: { start: new Date().toISOString() }
+                              },
+                              'Episode ID': {
+                                  rich_text: [{ text: { content: data.episodeId } }]
+                              }
+                          },
+                          children: [
+                              {
+                                  object: 'block',
+                                  type: 'heading_1',
+                                  heading_1: {
+                                      rich_text: [{ type: 'text', text: { content: data.title } }]
+                                  }
+                              },
+                              {
+                                  object: 'block',
+                                  type: 'paragraph',
+                                  paragraph: {
+                                      rich_text: [{ type: 'text', text: { content: data.content.substring(0, 2000) } }]
+                                  }
+                              }
+                          ]
+                      });
+                      
+                      return page;
+                  } catch (error) {
+                      console.error(`❌ Notion保存エラー: ${error.message}`);
+                      throw error;
+                  }
+              }
+              
+              async sendGmailNotification(data) {
+                  try {
+                      console.log(`📧 Gmail送信 [${data.episodeIndex}/${data.totalEpisodes}]: ${data.title}`);
+                      
+                      const testTime = new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+                      const subject = `[羊飼いまるおか] 新記事完成: ${data.title}`;
+                      
+                      const htmlContent = `
+                      <!DOCTYPE html>
+                      <html>
+                      <head>
+                          <meta charset="UTF-8">
+                          <style>
+                              body { font-family: 'Helvetica Neue', Arial, sans-serif; margin: 0; padding: 20px; background-color: #f5f7fa; }
+                              .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
+                              .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; }
+                              .header h1 { margin: 0; font-size: 24px; font-weight: 300; }
+                              .content { padding: 30px; }
+                              .success-box { background: #d4edda; border-left: 4px solid #28a745; padding: 20px; margin: 20px 0; border-radius: 5px; }
+                              .article-preview { background: #f8f9fa; border-left: 4px solid #007bff; padding: 20px; margin: 20px 0; border-radius: 5px; }
+                              .footer { background: #f8f9fa; padding: 20px; text-align: center; color: #666; font-size: 12px; }
+                              .btn { display: inline-block; background: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 10px 0; }
+                          </style>
+                      </head>
+                      <body>
+                          <div class="container">
+                              <div class="header">
+                                  <h1>🎉 新記事完成通知</h1>
+                                  <p>羊飼いまるおか AI自動ブログ生成システム</p>
+                                  <p>記事 ${data.episodeIndex}/${data.totalEpisodes}</p>
+                              </div>
+                              
+                              <div class="content">
+                                  <div class="success-box">
+                                      <h3>📄 ${data.title}</h3>
+                                      <p><strong>処理番号:</strong> ${data.episodeIndex}/${data.totalEpisodes}</p>
+                                      <p><strong>生成時刻:</strong> ${testTime}</p>
+                                      <p><strong>実行モード:</strong> ${this.resetMode}</p>
+                                  </div>
+                                  
+                                  <div class="article-preview">
+                                      <h3>📖 記事内容プレビュー</h3>
+                                      <p style="line-height: 1.6; color: #333;">
+                                          ${data.content.substring(0, 300)}...
+                                      </p>
+                                  </div>
+                                  
+                                  <div style="text-align: center;">
+                                      <a href="${data.notionUrl}" class="btn">📝 Notionで詳細を確認</a>
+                                  </div>
+                                  
+                                  <div class="success-box">
+                                      <h3>🎯 システム動作状況</h3>
+                                      <ul>
+                                          <li>✅ RSS取得・解析</li>
+                                          <li>✅ ブログ記事生成</li>
+                                          <li>✅ Notion自動保存</li>
+                                          <li>✅ Gmail自動配信</li>
+                                      </ul>
+                                  </div>
+                              </div>
+                              
+                              <div class="footer">
+                                  <p>🤖 このメールは自動送信されました</p>
+                                  <p>🔧 データリセット&全件再処理システム</p>
+                                  <p>📅 ${testTime} JST</p>
+                              </div>
+                          </div>
+                      </body>
+                      </html>
+                      `;
+                      
+                      const message = `To: hitujikai.maruoka@gmail.com\r\nSubject: ${subject}\r\nContent-Type: text/html; charset=utf-8\r\n\r\n${htmlContent}`;
+                      
+                      const result = await this.gmail.users.messages.send({
+                          userId: 'me',
+                          requestBody: { 
+                              raw: Buffer.from(message).toString('base64').replace(/\+/g, '-').replace(/\//g, '_') 
+                          }
+                      });
+                      
+                      console.log(`✅ Gmail送信成功 [${data.episodeIndex}]: ${result.data.id}`);
+                      
+                  } catch (error) {
+                      console.error(`❌ Gmail送信エラー: ${error.message}`);
+                  }
+              }
+              
+              async run() {
+                  try {
+                      console.log('🚀 データリセット&全件再処理システム開始');
+                      console.log('=' .repeat(70));
+                      console.log(`🎯 実行モード: ${this.resetMode}`);
+                      console.log(`📊 設定: ${this.config.description}`);
+                      console.log('=' .repeat(70));
+                      
+                      // Gmail初期化
+                      await this.initializeGmail();
+                      
+                      // Notionデータベースリセット
+                      const deletedCount = await this.resetNotionDatabase();
+                      
+                      // RSS全件取得
+                      const episodes = await this.fetchAllEpisodes();
+                      
+                      // 各エピソード処理
+                      console.log('\n🔄 エピソード処理開始');
+                      const results = [];
+                      
+                      for (let i = 0; i < episodes.length; i++) {
+                          const result = await this.processEpisode(episodes[i], i);
+                          results.push(result);
+                          
+                          // API制限対策
+                          if (i < episodes.length - 1) {
+                              await new Promise(resolve => setTimeout(resolve, 1500));
+                          }
+                      }
+                      
+                      // 結果サマリー
+                      const successful = results.filter(r => r.success).length;
+                      const failed = results.filter(r => !r.success).length;
+                      const previewed = results.filter(r => r.preview).length;
+                      const gmailSent = Math.min(3, successful - previewed);
+                      
+                      console.log('\n📊 データリセット&全件再処理 結果サマリー');
+                      console.log('=' .repeat(70));
+                      console.log(`🎯 実行モード: ${this.resetMode}`);
+                      console.log(`🗑️ 削除された記事: ${deletedCount} 件`);
+                      console.log(`📝 処理対象エピソード: ${episodes.length} 件`);
+                      console.log(`✅ 成功: ${successful} 件`);
+                      console.log(`❌ 失敗: ${failed} 件`);
+                      console.log(`👁️ プレビュー: ${previewed} 件`);
+                      console.log(`📧 Gmail送信: ${gmailSent} 件`);
+                      console.log('=' .repeat(70));
+                      
+                      if (this.resetMode === 'preview_only') {
+                          console.log('📋 プレビューモードでの実行完了');
+                          console.log('💡 実際のデータ処理には他のモードを選択してください');
+                      } else {
+                          console.log('🎉 データリセット&全件再処理完了！');
+                          
+                          if (this.gmail && gmailSent > 0) {
+                              console.log('📱 hitujikai.maruoka@gmail.com の受信箱を確認してください');
+                          }
+                      }
+                      
+                  } catch (error) {
+                      console.error(`❌ システムエラー: ${error.message}`);
+                      console.error('スタックトレース:', error.stack);
+                      throw error;
+                  }
+              }
+          }
+          
+          // 実行
+          const system = new CompleteResetSystem();
+          system.run().catch(console.error);
+          EOF
+          
+          # スクリプト実行
+          node complete-reset-system.js
