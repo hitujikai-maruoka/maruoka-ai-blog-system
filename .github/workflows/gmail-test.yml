@@ -264,12 +264,3 @@ jobs:
           
           # テスト実行
           node gmail-integration-test.js
-          
-      - name: 📊 テスト結果保存
-        if: always()
-        uses: actions/upload-artifact@v3
-        with:
-          name: gmail-test-results-${{ github.run_number }}
-          path: |
-            *.log
-          retention-days: 7
