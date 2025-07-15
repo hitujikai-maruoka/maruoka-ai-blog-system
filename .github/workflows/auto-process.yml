@@ -20,7 +20,7 @@ on:
 jobs:
   process-episodes:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     
     steps:
       - name: 🐑 チェックアウト
@@ -32,8 +32,10 @@ jobs:
           node-version: '18'
           
       - name: 🔧 依存関係インストール
-        run: npm install
-        
+        run: |
+          npm install
+          npm install googleapis google-auth-library
+          
       - name: 📁 ディレクトリ準備
         run: mkdir -p data
           
@@ -57,6 +59,325 @@ jobs:
             node src/index.js
           fi
           
+      - name: 📧 Gmail統合機能（記事完成通知）
+        if: success()
+        env:
+          GMAIL_CREDENTIALS_JSON: ${{ secrets.GMAIL_CREDENTIALS_JSON }}
+          GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
+        run: |
+          echo "📧 Gmail統合機能開始"
+          echo "テストモード: $TEST_MODE"
+          
+          cat > gmail-integration-main.js << 'EOF'
+          const { Client } = require('@notionhq/client');
+          const { google } = require('googleapis');
+          
+          async function sendCompletionNotifications() {
+              try {
+                  console.log('📧 記事完成通知システム開始');
+                  console.log(`🔧 テストモード: ${process.env.TEST_MODE}`);
+                  
+                  // Notion接続
+                  const notion = new Client({ auth: process.env.NOTION_API_KEY });
+                  const databaseId = process.env.NOTION_DATABASE_ID;
+                  
+                  // Gmail初期化
+                  console.log('🔗 Gmail認証開始...');
+                  const credentials = JSON.parse(process.env.GMAIL_CREDENTIALS_JSON);
+                  const token = JSON.parse(process.env.GMAIL_TOKEN_JSON);
+                  
+                  const auth = new google.auth.OAuth2(
+                      credentials.client_id,
+                      credentials.client_secret,
+                      credentials.redirect_uris[0]
+                  );
+                  auth.setCredentials(token);
+                  
+                  const gmail = google.gmail({ version: 'v1', auth: auth });
+                  
+                  // Gmail接続確認
+                  const profile = await gmail.users.getProfile({ userId: 'me' });
+                  console.log(`✅ Gmail認証完了: ${profile.data.emailAddress}`);
+                  
+                  // 最新の記事を取得（本日作成された記事）
+                  const today = new Date();
+                  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+                  
+                  console.log(`📅 検索開始日時: ${todayStart.toISOString()}`);
+                  
+                  const recentArticles = await notion.databases.query({
+                      database_id: databaseId,
+                      filter: {
+                          property: 'Created',
+                          date: {
+                              on_or_after: todayStart.toISOString()
+                          }
+                      },
+                      sorts: [
+                          {
+                              property: 'Created',
+                              direction: 'descending'
+                          }
+                      ],
+                      page_size: 10
+                  });
+                  
+                  console.log(`📋 本日作成された記事: ${recentArticles.results.length} 件`);
+                  
+                  if (recentArticles.results.length === 0) {
+                      console.log('📝 新しい記事がないため、Gmail送信をスキップします');
+                      
+                      // テストモードの場合は、既存記事の最新3件でテスト
+                      if (process.env.TEST_MODE === 'true') {
+                          console.log('🧪 テストモード: 既存記事でテスト送信を実行');
+                          
+                          const existingArticles = await notion.databases.query({
+                              database_id: databaseId,
+                              sorts: [
+                                  {
+                                      property: 'Created',
+                                      direction: 'descending'
+                                  }
+                              ],
+                              page_size: 3
+                          });
+                          
+                          if (existingArticles.results.length > 0) {
+                              console.log(`🧪 テスト対象記事: ${existingArticles.results.length} 件`);
+                              await processArticles(gmail, notion, existingArticles.results, true);
+                          } else {
+                              console.log('📝 既存記事も見つかりません');
+                          }
+                      }
+                      return;
+                  }
+                  
+                  // 記事処理
+                  await processArticles(gmail, notion, recentArticles.results, false);
+                  
+              } catch (error) {
+                  console.error(`❌ Gmail統合エラー: ${error.message}`);
+                  console.error('スタックトレース:', error.stack);
+                  throw error;
+              }
+          }
+          
+          async function processArticles(gmail, notion, articles, isTestMode) {
+              // 最新3件にメール送信
+              const articlesToNotify = articles.slice(0, 3);
+              console.log(`📧 メール送信対象: ${articlesToNotify.length} 件${isTestMode ? ' (テストモード)' : ''}`);
+              
+              for (let i = 0; i < articlesToNotify.length; i++) {
+                  const article = articlesToNotify[i];
+                  
+                  const title = article.properties.Title?.title?.[0]?.text?.content || '新しい記事';
+                  const episodeId = article.properties['Episode ID']?.rich_text?.[0]?.text?.content || '';
+                  const createdTime = article.properties.Created?.date?.start || new Date().toISOString();
+                  const status = article.properties.Status?.select?.name || '未設定';
+                  
+                  console.log(`📧 [${i + 1}/${articlesToNotify.length}] メール送信: ${title}`);
+                  console.log(`   📅 作成日時: ${createdTime}`);
+                  console.log(`   🏷️ ステータス: ${status}`);
+                  
+                  // 記事内容取得
+                  let content = '';
+                  try {
+                      const pageContent = await notion.blocks.children.list({
+                          block_id: article.id,
+                          page_size: 50
+                      });
+                      
+                      const textBlocks = pageContent.results
+                          .filter(block => block.type === 'paragraph' && block.paragraph?.rich_text?.length > 0)
+                          .map(block => block.paragraph.rich_text.map(text => text.plain_text).join(''))
+                          .join('\n\n');
+                          
+                      content = textBlocks || '記事内容の取得に失敗しました';
+                      console.log(`   📝 記事内容長: ${content.length} 文字`);
+                  } catch (error) {
+                      content = '記事内容の取得中にエラーが発生しました';
+                      console.log(`   ⚠️ 記事内容取得エラー: ${error.message}`);
+                  }
+                  
+                  // メール送信
+                  await sendNotificationEmail(gmail, {
+                      title: title,
+                      content: content,
+                      notionUrl: `https://notion.so/${article.id.replace(/-/g, '')}`,
+                      episodeId: episodeId,
+                      createdTime: createdTime,
+                      status: status,
+                      index: i + 1,
+                      total: articlesToNotify.length,
+                      isTestMode: isTestMode
+                  });
+                  
+                  // API制限対策
+                  if (i < articlesToNotify.length - 1) {
+                      await new Promise(resolve => setTimeout(resolve, 2000));
+                  }
+              }
+              
+              console.log('🎉 Gmail統合機能完了！');
+              console.log('📱 hitujikai.maruoka@gmail.com の受信箱を確認してください');
+          }
+          
+          async function sendNotificationEmail(gmail, data) {
+              try {
+                  const jstTime = new Date().toLocaleString('ja-JP', { 
+                      timeZone: 'Asia/Tokyo',
+                      year: 'numeric',
+                      month: '2-digit',
+                      day: '2-digit',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      second: '2-digit'
+                  });
+                  
+                  const subject = `[羊飼いまるおか] ${data.isTestMode ? 'テスト: ' : ''}新記事完成: ${data.title}`;
+                  
+                  const htmlContent = `
+                  <!DOCTYPE html>
+                  <html>
+                  <head>
+                      <meta charset="UTF-8">
+                      <style>
+                          body { font-family: 'Helvetica Neue', Arial, sans-serif; margin: 0; padding: 20px; background-color: #f5f7fa; }
+                          .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
+                          .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; }
+                          .header h1 { margin: 0; font-size: 24px; font-weight: 300; }
+                          .header .subtitle { margin: 5px 0; opacity: 0.9; }
+                          .content { padding: 30px; }
+                          .success-box { background: #d4edda; border-left: 4px solid #28a745; padding: 20px; margin: 20px 0; border-radius: 5px; }
+                          .test-box { background: #fff3cd; border-left: 4px solid #ffc107; padding: 20px; margin: 20px 0; border-radius: 5px; }
+                          .article-preview { background: #f8f9fa; border-left: 4px solid #007bff; padding: 20px; margin: 20px 0; border-radius: 5px; }
+                          .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin: 20px 0; }
+                          .info-item { background: #e9ecef; padding: 15px; border-radius: 8px; }
+                          .info-label { font-size: 12px; color: #666; margin-bottom: 5px; }
+                          .info-value { font-weight: bold; color: #333; }
+                          .footer { background: #f8f9fa; padding: 20px; text-align: center; color: #666; font-size: 12px; }
+                          .btn { display: inline-block; background: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 10px 0; }
+                          .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 20px 0; }
+                          .stat-item { background: #e9ecef; padding: 15px; border-radius: 8px; text-align: center; }
+                          .stat-icon { font-size: 18px; font-weight: bold; color: #28a745; }
+                          .stat-label { font-size: 11px; color: #666; margin-top: 5px; }
+                      </style>
+                  </head>
+                  <body>
+                      <div class="container">
+                          <div class="header">
+                              <h1>🐑 羊飼いまるおか</h1>
+                              <div class="subtitle">AI自動ブログ生成システム</div>
+                              <h2>📄 新記事完成通知</h2>
+                              ${data.isTestMode ? '<div class="subtitle">🧪 テストモード実行</div>' : ''}
+                          </div>
+                          
+                          <div class="content">
+                              ${data.isTestMode ? `
+                              <div class="test-box">
+                                  <h3>🧪 テストモード実行</h3>
+                                  <p>これはGmail統合機能のテスト実行です。既存の記事データを使用してメール送信機能をテストしています。</p>
+                              </div>
+                              ` : ''}
+                              
+                              <div class="success-box">
+                                  <h3>🎉 ${data.title}</h3>
+                                  <div class="info-grid">
+                                      <div class="info-item">
+                                          <div class="info-label">記事番号</div>
+                                          <div class="info-value">${data.index}/${data.total}</div>
+                                      </div>
+                                      <div class="info-item">
+                                          <div class="info-label">ステータス</div>
+                                          <div class="info-value">${data.status}</div>
+                                      </div>
+                                  </div>
+                              </div>
+                              
+                              <div class="stats">
+                                  <div class="stat-item">
+                                      <div class="stat-icon">✅</div>
+                                      <div class="stat-label">RSS取得</div>
+                                  </div>
+                                  <div class="stat-item">
+                                      <div class="stat-icon">✅</div>
+                                      <div class="stat-label">記事生成</div>
+                                  </div>
+                                  <div class="stat-item">
+                                      <div class="stat-icon">✅</div>
+                                      <div class="stat-label">Notion保存</div>
+                                  </div>
+                                  <div class="stat-item">
+                                      <div class="stat-icon">✅</div>
+                                      <div class="stat-label">Gmail配信</div>
+                                  </div>
+                              </div>
+                              
+                              <div class="article-preview">
+                                  <h3>📖 記事内容プレビュー</h3>
+                                  <p style="line-height: 1.6; color: #333; font-size: 14px;">
+                                      ${data.content.substring(0, 400)}${data.content.length > 400 ? '...' : ''}
+                                  </p>
+                              </div>
+                              
+                              <div style="text-align: center;">
+                                  <a href="${data.notionUrl}" class="btn">📝 Notionで全文を読む</a>
+                              </div>
+                              
+                              <div class="success-box">
+                                  <h3>🚀 システム稼働状況</h3>
+                                  <p>Gmail統合システムが正常に動作しています。${data.isTestMode ? 'テスト機能により既存記事でのメール送信を確認しました。' : '今後、新しい音声配信がアップロードされると、自動的に記事が生成され、メール通知が送信されます。'}</p>
+                              </div>
+                              
+                              <div class="info-grid">
+                                  <div class="info-item">
+                                      <div class="info-label">送信時刻</div>
+                                      <div class="info-value">${jstTime}</div>
+                                  </div>
+                                  <div class="info-item">
+                                      <div class="info-label">エピソードID</div>
+                                      <div class="info-value">${data.episodeId || 'N/A'}</div>
+                                  </div>
+                              </div>
+                          </div>
+                          
+                          <div class="footer">
+                              <p>🤖 このメールは自動送信されました</p>
+                              <p>🐑 羊飼いまるおか AI自動ブログ生成システム</p>
+                              <p>📅 ${jstTime} JST</p>
+                              ${data.isTestMode ? '<p>🧪 テストモード実行結果</p>' : ''}
+                          </div>
+                      </div>
+                  </body>
+                  </html>
+                  `;
+                  
+                  const message = `To: hitujikai.maruoka@gmail.com\r\nSubject: ${subject}\r\nContent-Type: text/html; charset=utf-8\r\n\r\n${htmlContent}`;
+                  
+                  const result = await gmail.users.messages.send({
+                      userId: 'me',
+                      requestBody: { 
+                          raw: Buffer.from(message).toString('base64').replace(/\+/g, '-').replace(/\//g, '_') 
+                      }
+                  });
+                  
+                  console.log(`✅ Gmail送信成功 [${data.index}]: ${result.data.id}`);
+                  
+              } catch (error) {
+                  console.error(`❌ Gmail送信エラー: ${error.message}`);
+                  throw error;
+              }
+          }
+          
+          sendCompletionNotifications().catch(console.error);
+          EOF
+          
+          # Gmail統合スクリプト実行
+          node gmail-integration-main.js
+          
       - name: 📊 処理結果サマリー
         if: always()
         run: |
@@ -64,6 +385,7 @@ jobs:
           echo "**実行時刻（JST）:** $(TZ=Asia/Tokyo date)" >> $GITHUB_STEP_SUMMARY
           echo "**実行トリガー:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
           echo "**テストモード:** ${{ github.event.inputs.test_mode || 'false' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Gmail統合:** ✅ 有効" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           if [ -f "data/processing_summary.json" ]; then
@@ -92,6 +414,7 @@ jobs:
             
             **エラー発生時刻（JST）:** ${new Date().toLocaleString('ja-JP', {timeZone: 'Asia/Tokyo'})}
             **ワークフロー実行ID:** ${{ github.run_id }}
+            **Gmail統合:** 有効
             
             ### 🔗 関連リンク
             - [実行ログ](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
@@ -99,7 +422,8 @@ jobs:
             ### 🔧 対処が必要です
             1. 実行ログを確認してエラー原因を特定
             2. RSS URL やNotion API接続を確認
-            3. 修正後、手動でワークフローを再実行
+            3. Gmail認証情報の有効期限を確認
+            4. 修正後、手動でワークフローを再実行
             
             ### 📅 次回の自動実行
             明日の21時に自動実行されます
@@ -110,5 +434,5 @@ jobs:
               repo: context.repo.repo,
               title: title,
               body: body,
-              labels: ['bug', 'automation', 'daily-processing']
+              labels: ['bug', 'automation', 'daily-processing', 'gmail-integration']
             });
