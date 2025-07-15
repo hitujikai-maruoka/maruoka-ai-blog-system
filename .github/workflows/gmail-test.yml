@@ -1,0 +1,275 @@
+name: Gmail統合テスト
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: 'テストモード'
+        required: true
+        default: 'full_test'
+        type: choice
+        options:
+          - connection_only
+          - send_test
+          - full_test
+
+jobs:
+  gmail-integration-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: 🚀 リポジトリをチェックアウト
+        uses: actions/checkout@v4
+        
+      - name: 📦 Node.js環境をセットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: 🔧 依存関係をインストール
+        run: |
+          npm ci
+          npm install googleapis google-auth-library
+          
+      - name: 🔍 環境変数確認
+        run: |
+          echo "🔍 Gmail認証情報確認中..."
+          echo "Gmail Credentials: ${{ secrets.GMAIL_CREDENTIALS_JSON != '' && '✅ 設定済み' || '❌ 未設定' }}"
+          echo "Gmail Token: ${{ secrets.GMAIL_TOKEN_JSON != '' && '✅ 設定済み' || '❌ 未設定' }}"
+          echo "Notion API Key: ${{ secrets.NOTION_API_KEY != '' && '✅ 設定済み' || '❌ 未設定' }}"
+          echo "Notion Database ID: ${{ secrets.NOTION_DATABASE_ID != '' && '✅ 設定済み' || '❌ 未設定' }}"
+          
+      - name: 📧 Gmail統合テスト実行
+        env:
+          GMAIL_CREDENTIALS_JSON: ${{ secrets.GMAIL_CREDENTIALS_JSON }}
+          GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
+          TEST_MODE: ${{ github.event.inputs.test_mode }}
+        run: |
+          echo "🎉 Gmail統合テスト開始"
+          echo "テストモード: $TEST_MODE"
+          echo "実行時刻: $(date '+%Y-%m-%d %H:%M:%S JST')"
+          
+          # Gmail統合テストスクリプトを作成・実行
+          cat > gmail-integration-test.js << 'EOF'
+          const { google } = require('googleapis');
+          
+          async function testGmailIntegration() {
+              console.log('🎉 Gmail統合テスト開始');
+              console.log('=' .repeat(60));
+              
+              try {
+                  // 環境変数確認
+                  console.log('\n🔍 認証情報確認');
+                  const hasCredentials = !!process.env.GMAIL_CREDENTIALS_JSON;
+                  const hasToken = !!process.env.GMAIL_TOKEN_JSON;
+                  
+                  console.log(`📋 GMAIL_CREDENTIALS_JSON: ${hasCredentials ? '✅ 設定済み' : '❌ 未設定'}`);
+                  console.log(`🎫 GMAIL_TOKEN_JSON: ${hasToken ? '✅ 設定済み' : '❌ 未設定'}`);
+                  
+                  if (!hasCredentials || !hasToken) {
+                      throw new Error('Gmail認証情報が設定されていません');
+                  }
+                  
+                  // 認証情報解析
+                  console.log('\n🔐 認証情報解析');
+                  const credentials = JSON.parse(process.env.GMAIL_CREDENTIALS_JSON);
+                  const token = JSON.parse(process.env.GMAIL_TOKEN_JSON);
+                  
+                  console.log(`📊 Project ID: ${credentials.project_id}`);
+                  console.log(`🆔 Client ID: ${credentials.client_id.substring(0, 20)}...`);
+                  console.log(`🔄 Refresh Token: ${token.refresh_token ? '存在' : '未設定'}`);
+                  console.log(`⏰ Token有効期限: ${token.expiry || 'N/A'}`);
+                  
+                  // Gmail API認証
+                  console.log('\n🔗 Gmail API認証');
+                  const auth = new google.auth.OAuth2(
+                      credentials.client_id,
+                      credentials.client_secret,
+                      credentials.redirect_uris[0]
+                  );
+                  
+                  auth.setCredentials(token);
+                  const gmail = google.gmail({ version: 'v1', auth: auth });
+                  
+                  // 接続テスト
+                  console.log('\n📡 Gmail接続テスト');
+                  const profile = await gmail.users.getProfile({ userId: 'me' });
+                  
+                  console.log('✅ Gmail接続成功！');
+                  console.log(`📧 メールアドレス: ${profile.data.emailAddress}`);
+                  console.log(`📊 総メッセージ数: ${profile.data.messagesTotal.toLocaleString()} 件`);
+                  console.log(`📝 総スレッド数: ${profile.data.threadsTotal.toLocaleString()} 件`);
+                  
+                  // テストメール作成
+                  console.log('\n📝 テストメール作成');
+                  const now = new Date();
+                  const jstTime = now.toLocaleString('ja-JP', {
+                      timeZone: 'Asia/Tokyo',
+                      year: 'numeric',
+                      month: '2-digit',
+                      day: '2-digit',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      second: '2-digit'
+                  });
+                  
+                  const testSubject = `[羊飼いまるおか] Gmail統合テスト完了 🎉 ${jstTime}`;
+                  
+                  const testHtml = `
+                  <!DOCTYPE html>
+                  <html>
+                  <head>
+                      <meta charset="UTF-8">
+                      <style>
+                          body { font-family: 'Helvetica Neue', Arial, sans-serif; margin: 0; padding: 20px; background-color: #f5f7fa; }
+                          .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
+                          .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; }
+                          .header h1 { margin: 0; font-size: 24px; font-weight: 300; }
+                          .content { padding: 30px; }
+                          .success-box { background: #d4edda; border-left: 4px solid #28a745; padding: 20px; margin: 20px 0; border-radius: 5px; }
+                          .test-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin: 20px 0; }
+                          .test-item { background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; }
+                          .test-value { font-size: 18px; font-weight: bold; color: #28a745; }
+                          .test-label { font-size: 12px; color: #666; margin-top: 5px; }
+                          .footer { background: #f8f9fa; padding: 20px; text-align: center; color: #666; font-size: 12px; }
+                          .info-table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+                          .info-table td { padding: 8px; border-bottom: 1px solid #eee; }
+                          .info-table td:first-child { font-weight: bold; color: #333; }
+                      </style>
+                  </head>
+                  <body>
+                      <div class="container">
+                          <div class="header">
+                              <h1>🎉 Gmail統合テスト完了</h1>
+                              <p>羊飼いまるおか AI自動ブログ生成システム</p>
+                          </div>
+                          
+                          <div class="content">
+                              <div class="success-box">
+                                  <h3>✅ Gmail統合システム稼働確認</h3>
+                                  <p>すべてのテスト項目が正常に完了しました。Gmail自動配信機能が正常に動作しています。</p>
+                              </div>
+                              
+                              <h3>📊 テスト結果詳細</h3>
+                              <div class="test-grid">
+                                  <div class="test-item">
+                                      <div class="test-value">✅</div>
+                                      <div class="test-label">API認証</div>
+                                  </div>
+                                  <div class="test-item">
+                                      <div class="test-value">✅</div>
+                                      <div class="test-label">接続テスト</div>
+                                  </div>
+                                  <div class="test-item">
+                                      <div class="test-value">✅</div>
+                                      <div class="test-label">メール生成</div>
+                                  </div>
+                                  <div class="test-item">
+                                      <div class="test-value">✅</div>
+                                      <div class="test-label">送信完了</div>
+                                  </div>
+                              </div>
+                              
+                              <h3>📋 システム情報</h3>
+                              <table class="info-table">
+                                  <tr><td>テスト実行時刻</td><td>${jstTime}</td></tr>
+                                  <tr><td>実行環境</td><td>GitHub Actions</td></tr>
+                                  <tr><td>メールアドレス</td><td>${profile.data.emailAddress}</td></tr>
+                                  <tr><td>総メッセージ数</td><td>${profile.data.messagesTotal.toLocaleString()} 件</td></tr>
+                                  <tr><td>総スレッド数</td><td>${profile.data.threadsTotal.toLocaleString()} 件</td></tr>
+                              </table>
+                              
+                              <div class="success-box">
+                                  <h3>🚀 今後の動作</h3>
+                                  <p>新しい音声配信がstand.fmにアップロードされると、以下の自動処理が実行されます：</p>
+                                  <ol>
+                                      <li>📡 RSS監視（1時間毎）</li>
+                                      <li>🔍 新エピソード検出</li>
+                                      <li>🤖 記事自動生成</li>
+                                      <li>💾 Notion保存</li>
+                                      <li>📧 Gmail自動配信 ← 今回テスト完了</li>
+                                  </ol>
+                              </div>
+                              
+                              <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                                  <h3>⚡ システム完全稼働</h3>
+                                  <p>Gmail統合システムが完全に稼働しています。今後は完全自動化でブログ記事の生成・配信が行われます。</p>
+                              </div>
+                          </div>
+                          
+                          <div class="footer">
+                              <p>🤖 このメールは自動送信されました</p>
+                              <p>🔧 羊飼いまるおか AI自動ブログ生成システム</p>
+                              <p>📅 ${jstTime} JST</p>
+                          </div>
+                      </div>
+                  </body>
+                  </html>
+                  `;
+                  
+                  // メール送信
+                  console.log('\n📬 テストメール送信');
+                  const rawMessage = Buffer.from(
+                      `To: hitujikai.maruoka@gmail.com\r\n` +
+                      `Subject: ${testSubject}\r\n` +
+                      `Content-Type: text/html; charset=utf-8\r\n\r\n` +
+                      testHtml
+                  ).toString('base64').replace(/\+/g, '-').replace(/\//g, '_');
+                  
+                  const result = await gmail.users.messages.send({
+                      userId: 'me',
+                      requestBody: { raw: rawMessage }
+                  });
+                  
+                  console.log('✅ テストメール送信成功！');
+                  console.log(`📬 メッセージID: ${result.data.id}`);
+                  console.log(`📧 送信先: hitujikai.maruoka@gmail.com`);
+                  console.log(`📋 件名: ${testSubject}`);
+                  
+                  // 最終結果
+                  console.log('\n🎯 Gmail統合テスト結果サマリー');
+                  console.log('=' .repeat(60));
+                  console.log('🔐 認証システム: ✅ 正常');
+                  console.log('📡 API接続: ✅ 正常');
+                  console.log('📝 HTMLメール生成: ✅ 正常');
+                  console.log('📬 メール送信: ✅ 正常');
+                  console.log('\n🎉 Gmail統合システム完全稼働確認！');
+                  console.log('📱 hitujikai.maruoka@gmail.com の受信箱を確認してください');
+                  console.log('\n🚀 次回から新しい音声配信時に自動メール送信されます！');
+                  
+              } catch (error) {
+                  console.error('\n❌ Gmail統合テストエラー');
+                  console.error(`エラータイプ: ${error.constructor.name}`);
+                  console.error(`エラーメッセージ: ${error.message}`);
+                  
+                  if (error.response) {
+                      console.error(`HTTPステータス: ${error.response.status}`);
+                      console.error(`レスポンス: ${JSON.stringify(error.response.data, null, 2)}`);
+                  }
+                  
+                  console.error('\nスタックトレース:');
+                  console.error(error.stack);
+                  
+                  throw error;
+              }
+          }
+          
+          testGmailIntegration().catch(error => {
+              console.error('テスト実行失敗:', error.message);
+              process.exit(1);
+          });
+          EOF
+          
+          # テスト実行
+          node gmail-integration-test.js
+          
+      - name: 📊 テスト結果保存
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: gmail-test-results-${{ github.run_number }}
+          path: |
+            *.log
+          retention-days: 7
